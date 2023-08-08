@@ -1,8 +1,7 @@
 import { h } from "preact";
 import * as phooks from "preact/hooks";
 import { lazy, useEffect, useState } from "react";
-import { fromPreact, toPreact } from "./preact.tsx";
-import { fromReact, toReact } from "./react.tsx";
+import { fromPreact, fromReact, toPreact, toReact } from "./impl.tsx";
 
 // render preact
 const PreactIsland = () => {
@@ -18,7 +17,7 @@ const PreactIsland = () => {
 const PolyPreactIsland = fromPreact(PreactIsland);
 {
   // render root
-  const ConvertedFromPreact = toReact(PolyPreactIsland);
+  const ConvertedFromPreact = toReact(PolyPreactIsland, {});
   const App = lazy(() => import("./App.tsx"));
   function Root() {
     return (
@@ -44,8 +43,10 @@ const PolyPreactIsland = fromPreact(PreactIsland);
 
   const rootElement = document.getElementById("root")!;
   const p = fromReact(Root);
-  await p.setHtml(rootElement);
-  p.setHydrationHook(rootElement, ["click"]);
+  const instance = p.attach(rootElement);
+  const html = await p.stringify({});
+  rootElement.innerHTML = html;
+  instance.setHydrationHook(["click"]);
 }
 
 {
@@ -53,8 +54,12 @@ const PolyPreactIsland = fromPreact(PreactIsland);
   rootElement.className = "preact-root";
   document.body.appendChild(rootElement);
   const p = fromPreact(PreactIsland);
-  await p.setHtml(rootElement);
-  await p.hydrate(rootElement);
+  const instance = p.attach(rootElement);
+  const html = await p.stringify({});
+  rootElement.innerHTML = html;
+  instance.hydrate({});
+  // await p.setHtml(rootElement);
+  // await p.hydrate(rootElement);
 }
 
 {
@@ -62,7 +67,7 @@ const PolyPreactIsland = fromPreact(PreactIsland);
     return <div>hello react in preact</div>;
   };
   const poly = fromReact(Simple);
-  const ConvertedFromReact = toPreact(poly);
+  const ConvertedFromReact = toPreact(poly, {});
   function PreactWithReact() {
     return h("div", null, [
       h("h2", null, "Preact With React"),
@@ -76,16 +81,13 @@ const PolyPreactIsland = fromPreact(PreactIsland);
   rootElement.className = "preact-root2";
   document.body.appendChild(rootElement);
   const p = fromPreact(PreactWithReact);
-  try {
-    await p.setHtml(rootElement);
-    // await p.hydrate(rootElement);
-  } catch (e) {
-    console.log(e);
-  }
-  // await p.hydrate(rootElement);
+  const instance = p.attach(rootElement);
+  const html = await p.stringify({});
+  rootElement.innerHTML = html;
+  instance.hydrate({});
 }
 
-// Intersection loading views
+// // Intersection loading views
 {
   function MyView() {
     // const ref = useRef<HTMLDivElement>(null);
@@ -119,7 +121,9 @@ const PolyPreactIsland = fromPreact(PreactIsland);
     document.body.appendChild(el);
 
     const p = fromReact(MyView);
-    await p.setHtml(el);
-    p.setHydrationHook(el, ["view"]);
+    const instance = p.attach(el);
+    const html = await p.stringify({});
+    el.innerHTML = html;
+    instance.setHydrationHook(["view"]);
   }
 }
