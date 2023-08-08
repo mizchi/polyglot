@@ -1,51 +1,75 @@
 import { h } from "preact";
 import * as phooks from "preact/hooks";
 import { lazy, useEffect, useState } from "react";
-import { fromPreact, fromReact, toPreact, toReact } from "./impl.tsx";
+import {
+  createRenderingContext,
+  fromPreact,
+  fromReact,
+  fromStatic,
+  toPreact,
+  toReact,
+} from "./impl.tsx";
 
+const ctx = createRenderingContext();
 // render preact
 const PreactIsland = () => {
   const [count, setCount] = phooks.useState(0);
   const onClick = phooks.useCallback(() => {
     setCount(count + 1);
   }, [count]);
-  return h("div", null, [
-    h("h2", null, "Preact Island"),
-    h("button", { onClick }, `preact: counter is ${count}`),
-  ]);
+  return h(
+    "div",
+    {
+      style: { outline: "1px solid red", padding: 3 },
+    },
+    [
+      h("h2", null, "Preact Island"),
+      h("button", { onClick }, `preact: counter is ${count}`),
+    ],
+  );
 };
-const PolyPreactIsland = fromPreact(PreactIsland);
 {
   // render root
-  const ConvertedFromPreact = toReact(PolyPreactIsland, {});
+  const PolyPreactIsland = fromPreact(PreactIsland, {}, ctx);
+  const PreactToReact = toReact(PolyPreactIsland);
+  const Direct = (props: { name: string }) => {
+    return <div>React to React - {props.name}</div>;
+  };
+
+  const PolyDirect = fromReact(Direct, { name: "world" });
+  const ReactToReact = toReact(PolyDirect);
+
+  const staticTemplate = `<div style="outline: 1px solid green; padding: 3px;">Static</div>`;
+  const PolyStatic = fromStatic(staticTemplate, ctx);
+  const StaticToReact = toReact(PolyStatic);
+
   const App = lazy(() => import("./App.tsx"));
   function Root() {
     return (
-      <>
-        <div style={{}}>
+      <div style={{ outline: "1px solid blue", padding: 3 }}>
+        <div>
           <h2>React Island</h2>
           <App />
         </div>
         <div
           style={{
             padding: 10,
-            outline: "1px black dashed",
             background: "#eee",
           }}
         >
-          <h3>&gt; Preact In React</h3>
-          <ConvertedFromPreact />
+          <PreactToReact />
+          <ReactToReact />
+          <StaticToReact />
         </div>
         <hr />
-      </>
+      </div>
     );
   }
-
   const rootElement = document.getElementById("root")!;
-  const p = fromReact(Root);
+  const p = fromReact(Root, {});
   const instance = p.attach(rootElement);
-  const html = await p.stringify({});
-  rootElement.innerHTML = html;
+  const markup = await p.stringify();
+  rootElement.innerHTML = markup.html;
   instance.setHydrationHook(["click"]);
 }
 
@@ -53,41 +77,51 @@ const PolyPreactIsland = fromPreact(PreactIsland);
   const rootElement = document.createElement("div");
   rootElement.className = "preact-root";
   document.body.appendChild(rootElement);
-  const p = fromPreact(PreactIsland);
+  const p = fromPreact(PreactIsland, {}, ctx);
   const instance = p.attach(rootElement);
-  const html = await p.stringify({});
-  rootElement.innerHTML = html;
-  instance.hydrate({});
-  // await p.setHtml(rootElement);
-  // await p.hydrate(rootElement);
+  const markup = await p.stringify();
+  rootElement.innerHTML = markup.html;
+  instance.hydrate();
 }
 
 {
-  const Simple = () => {
-    return <div>hello react in preact</div>;
+  const Simple = (props: { name: string }) => {
+    return (
+      <div style={{ outline: "1px solid blue", padding: 3 }}>
+        hello {props.name} (preact)
+      </div>
+    );
   };
-  const poly = fromReact(Simple);
-  const ConvertedFromReact = toPreact(poly, {});
+  const poly = fromReact(Simple, {
+    name: "world",
+  });
+  const ConvertedFromReact = toPreact(poly);
   function PreactWithReact() {
-    return h("div", null, [
-      h("h2", null, "Preact With React"),
-      h("div", null, [
-        // expect hello
-        h(ConvertedFromReact, null),
-      ]),
-    ]);
+    return h(
+      "div",
+      {
+        style: { outline: "1px solid red", padding: 3 },
+      },
+      [
+        h("h2", null, "Preact With React"),
+        h("div", null, [
+          // expect hello
+          h(ConvertedFromReact, null),
+        ]),
+      ],
+    );
   }
   const rootElement = document.createElement("div");
   rootElement.className = "preact-root2";
   document.body.appendChild(rootElement);
-  const p = fromPreact(PreactWithReact);
+  const p = fromPreact(PreactWithReact, {}, ctx);
   const instance = p.attach(rootElement);
-  const html = await p.stringify({});
-  rootElement.innerHTML = html;
-  instance.hydrate({});
+  const markup = await p.stringify();
+  rootElement.innerHTML = markup.html;
+  instance.hydrate();
 }
 
-// // Intersection loading views
+// Intersection loading views
 {
   function MyView() {
     // const ref = useRef<HTMLDivElement>(null);
@@ -105,6 +139,7 @@ const PolyPreactIsland = fromPreact(PreactIsland);
             height: 400,
             boxSizing: "border-box",
             background: loaded ? "#eee" : "1px solid #ddd",
+            outline: "1px solid blue",
             display: "grid",
             placeItems: "center",
           }}
@@ -115,15 +150,23 @@ const PolyPreactIsland = fromPreact(PreactIsland);
     );
   }
 
+  const listRoot = document.createElement("div");
+  listRoot.className = "list-root";
+  listRoot.style.display = "flex";
+  listRoot.style.flexWrap = "wrap";
+  document.body.appendChild(listRoot);
   for (const _i of [0, 1, 2, 3, 4]) {
     const el = document.createElement("div");
     el.className = "view" + _i;
-    document.body.appendChild(el);
-
-    const p = fromReact(MyView);
+    // document.body.appendChild(el);
+    listRoot.appendChild(el);
+    const p = fromReact(MyView, {});
     const instance = p.attach(el);
-    const html = await p.stringify({});
-    el.innerHTML = html;
+    const markup = await p.stringify();
+    el.innerHTML = markup.html;
     instance.setHydrationHook(["view"]);
   }
 }
+
+const hooks = ctx.getHooks();
+console.log("hooks", hooks);
