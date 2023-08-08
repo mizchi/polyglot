@@ -2,15 +2,17 @@ import { h } from "preact";
 import * as phooks from "preact/hooks";
 import { lazy, useEffect, useState } from "react";
 import {
-  createRenderingContext,
   fromPreact,
   fromReact,
   fromStatic,
+  fromSvelte,
+  getClientComponentFromSvelteTemplate,
+  getServerRendererFromSvelteTemplate,
+  setHydrationHook,
   toPreact,
   toReact,
 } from "./impl.tsx";
 
-const ctx = createRenderingContext();
 // render preact
 const PreactIsland = () => {
   const [count, setCount] = phooks.useState(0);
@@ -30,7 +32,7 @@ const PreactIsland = () => {
 };
 {
   // render root
-  const PolyPreactIsland = fromPreact(PreactIsland, {}, ctx);
+  const PolyPreactIsland = fromPreact(PreactIsland, {});
   const PreactToReact = toReact(PolyPreactIsland);
   const Direct = (props: { name: string }) => {
     return <div>React to React - {props.name}</div>;
@@ -40,7 +42,7 @@ const PreactIsland = () => {
   const ReactToReact = toReact(PolyDirect);
 
   const staticTemplate = `<div style="outline: 1px solid green; padding: 3px;">Static</div>`;
-  const PolyStatic = fromStatic(staticTemplate, ctx);
+  const PolyStatic = fromStatic(staticTemplate);
   const StaticToReact = toReact(PolyStatic);
 
   const App = lazy(() => import("./App.tsx"));
@@ -68,18 +70,43 @@ const PreactIsland = () => {
   const rootElement = document.getElementById("root")!;
   const p = fromReact(Root, {});
   const instance = p.attach(rootElement);
-  const markup = await p.stringify();
+  const markup = await p.toMarkup();
   rootElement.innerHTML = markup.html;
-  instance.setHydrationHook(["click"]);
+  setHydrationHook(rootElement, ["click"], instance.hydrate);
 }
 
 {
+  // preact root
   const rootElement = document.createElement("div");
   rootElement.className = "preact-root";
   document.body.appendChild(rootElement);
-  const p = fromPreact(PreactIsland, {}, ctx);
+  const p = fromPreact(PreactIsland, {});
   const instance = p.attach(rootElement);
-  const markup = await p.stringify();
+  const markup = await p.toMarkup();
+  rootElement.innerHTML = markup.html;
+  instance.hydrate();
+}
+
+{
+  // svelte root
+  const rootElement = document.createElement("div");
+  rootElement.className = "svelte-root";
+  document.body.appendChild(rootElement);
+  const template = `
+<script>
+  let x = 1;
+  const onClick = () => {
+    x += 1;
+  }
+</script>
+<div>svelte:{x}</div>
+<button on:click={onClick}>click</button>
+`;
+  const serverRenderer = await getServerRendererFromSvelteTemplate(template);
+  const clientComponent = await getClientComponentFromSvelteTemplate(template);
+  const polyglot = fromSvelte(serverRenderer, clientComponent, {});
+  const instance = polyglot.attach(rootElement);
+  const markup = await polyglot.toMarkup();
   rootElement.innerHTML = markup.html;
   instance.hydrate();
 }
@@ -114,9 +141,9 @@ const PreactIsland = () => {
   const rootElement = document.createElement("div");
   rootElement.className = "preact-root2";
   document.body.appendChild(rootElement);
-  const p = fromPreact(PreactWithReact, {}, ctx);
+  const p = fromPreact(PreactWithReact, {});
   const instance = p.attach(rootElement);
-  const markup = await p.stringify();
+  const markup = await p.toMarkup();
   rootElement.innerHTML = markup.html;
   instance.hydrate();
 }
@@ -124,7 +151,6 @@ const PreactIsland = () => {
 // Intersection loading views
 {
   function MyView() {
-    // const ref = useRef<HTMLDivElement>(null);
     const [loaded, setLoaded] = useState(false);
     useEffect(() => {
       setTimeout(() => {
@@ -162,11 +188,8 @@ const PreactIsland = () => {
     listRoot.appendChild(el);
     const p = fromReact(MyView, {});
     const instance = p.attach(el);
-    const markup = await p.stringify();
+    const markup = await p.toMarkup();
     el.innerHTML = markup.html;
-    instance.setHydrationHook(["view"]);
+    setHydrationHook(el, ["view"], instance.hydrate);
   }
 }
-
-const hooks = ctx.getHooks();
-console.log("hooks", hooks);

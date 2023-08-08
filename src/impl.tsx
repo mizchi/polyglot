@@ -7,25 +7,45 @@ import * as Preact from "preact/compat";
 import preactRender from "preact-render-to-string";
 import preactPrepass from "preact-ssr-prepass";
 import * as preactHooks from "preact/hooks";
+import { compile as svelteCompile } from "svelte/compiler";
+import type { ComponentType as SvelteComponentType } from "svelte";
 
-type Hook = "view" | "click";
+type HookResult = ViewHookResult | ClickHookResult;
+type ViewHookResult = {
+  type: "view";
+};
+type ClickHookResult = {
+  type: "click";
+  target: HTMLElement;
+  clonedEvent: MouseEvent;
+};
+
+type HookDef = ViewHookDef | ClickHookDef;
+type ViewHookDef = {
+  type: "view";
+};
+type ClickHookDef = {
+  type: "click";
+  selector: string;
+};
+
 type StaticMarkup = {
   html: string;
   css: string;
   props: string;
+  hooks: Array<HookDef>;
 };
 
 export type PolyglotInstance = {
-  setHydrationHook: (hooks: Hook[]) => void;
   hydrate: () => Promise<void>;
   dispose: () => void;
 };
 
 export type PolyglotComponent<P> = {
-  impl: "react" | "preact" | "static";
+  impl: "react" | "preact" | "static" | "svelte";
   attach(root: HTMLElement): PolyglotInstance;
-  stringify: () => Promise<StaticMarkup>;
-  getProps: () => P;
+  toMarkup: () => Promise<StaticMarkup>;
+  // getProps: () => P;
   load: () => Promise<any>;
 };
 
@@ -43,7 +63,7 @@ export interface PreactPolyglotComponent<Props>
 
 type SSRContextApi = {
   addClickHook: (selector: string) => void;
-  getHooks: () => {};
+  getHooks(): Array<HookDef>;
 };
 
 export const SSRContext = React.createContext<SSRContextApi | false>(false);
@@ -52,62 +72,70 @@ const polyglotWrapperStyle = {
   display: "contents",
 };
 
-type Deferred<T> = {
-  promise: Promise<T>;
-  resolve: (value: T) => void;
-  reject: (err: any) => void;
-};
-function defer<T>(): Deferred<T> {
-  let resolve: ((value: T) => void) | undefined = undefined;
-  let reject: ((value: any) => void) | undefined = undefined;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
+export async function setHydrationHook(
+  target: HTMLElement,
+  types: string[],
+  hydrate: () => Promise<void>,
+) {
+  const hooks: Array<Promise<HookResult>> = [];
+  if (types.includes("click")) hooks.push(registerClickHook(target));
+  if (types.includes("view")) hooks.push(registerViewHook(target));
+  const resolved = await Promise.race(hooks);
+  await hydrate();
+  if (resolved.type === "click") {
+    resolved.target.dispatchEvent(resolved.clonedEvent);
+  }
+}
+
+function registerViewHook(el: HTMLElement) {
+  let dispose: Function | undefined = undefined;
+  const p = new Promise<ViewHookResult>((resolve, reject) => {
+    let isHydrated = false;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.find((x) => x.isIntersecting)) {
+          if (isHydrated) return;
+          isHydrated = true;
+          resolve({ type: "view" });
+        }
+      },
+      {
+        root: null,
+        threshold: 0,
+      },
+    );
+    observer.observe(el);
+    dispose = () => {
+      reject();
+      observer.unobserve(el);
+    };
   });
-  return {
-    promise,
-    resolve: resolve!,
-    reject: reject!,
-  };
+  p.finally(dispose);
+  return p;
 }
 
-// Utils
-
-// click injector
-function setViewHook(el: HTMLElement, onResolve: () => void) {
-  let isHydrated = false;
-  const observer = new IntersectionObserver(
-    (entries) => {
-      if (entries.find((x) => x.isIntersecting)) {
-        if (isHydrated) return;
-        isHydrated = true;
-        onResolve();
-      }
-    },
-    {
-      root: null,
-      threshold: 0,
-    },
-  );
-  observer.observe(el);
-  return () => observer.unobserve(el);
-}
-
-export function setClickHook(el: HTMLElement, onResolve: () => void) {
-  let isHydrated = false;
-  const onClick = (ev: MouseEvent) => {
-    if (isHydrated) return;
-    isHydrated = true;
-    console.log("hydrate by click!");
-    // @ts-ignore
-    const newEvent = new ev.constructor(ev.type, ev);
-    onResolve();
-    // hydrate(dispose);
-  };
-  el.addEventListener("click", onClick);
-  return () => {
-    el.removeEventListener("click", onClick);
-  };
+function registerClickHook(el: HTMLElement) {
+  let dispose: Function | undefined = undefined;
+  const p = new Promise<ClickHookResult>((resolve) => {
+    let isHydrated = false;
+    const onClick = async (ev: MouseEvent) => {
+      if (isHydrated) return;
+      const newEvent = new (ev as any).constructor(ev.type, ev);
+      const originalTarget = ev.target;
+      resolve({
+        type: "click",
+        target: originalTarget as HTMLElement,
+        clonedEvent: newEvent,
+      });
+    };
+    el.addEventListener("click", onClick, {
+      once: true,
+      passive: true,
+    });
+    dispose = () => el.removeEventListener("click", onClick);
+  });
+  p.finally(dispose);
+  return p;
 }
 
 // WIP
@@ -120,8 +148,8 @@ export function observe() {
             return m.type === "childList" ? Array.from(m.addedNodes) : [];
           })
           .filter((n) => n instanceof HTMLElement) as HTMLElement[];
-        for (const node of flatten) {
-        }
+        // for (const node of flatten) {
+        // }
       });
       observer.observe(document.body, {
         childList: true,
@@ -135,13 +163,19 @@ export function observe() {
 export function fromReact<P>(
   Component: React.ComponentType<any>,
   props: P,
-  ssrCtx?: SSRContextApi,
 ): PolyglotComponent<P> {
+  const Wrapped = (props: { onLoaded?: () => void }) => {
+    React.useEffect(() => {
+      props.onLoaded?.();
+    }, []);
+    return <Component {...props} />;
+  };
+
   return {
     impl: "react",
-    stringify,
+    toMarkup: stringify,
     attach,
-    getProps: () => props,
+    // getProps: () => props,
     load: async () => {
       return () => {
         return <Component {...props} />;
@@ -149,57 +183,18 @@ export function fromReact<P>(
     },
   };
   function attach(el: HTMLElement): PolyglotInstance {
-    let isHydrated = false;
     return {
       hydrate,
-      setHydrationHook,
       dispose() {},
     };
-    // function dispose() {}
-    function setHydrationHook(types: string[]) {
-      const { promise, resolve, reject } = defer<void>();
-      if (types.includes("click")) {
-        // click injector
-        const onClick = (ev: MouseEvent) => {
-          if (isHydrated) return;
-          isHydrated = true;
-          console.log("hydrate by click!");
-          // @ts-ignore
-          const newEvent = new ev.constructor(ev.type, ev);
-          const TempLoader = () => {
-            React.useEffect(() => {
-              ev.target?.dispatchEvent(newEvent);
-              resolve();
-            }, []);
-            return <Component />;
-          };
-          ReactDOM.hydrateRoot(el, <TempLoader />, {
-            onRecoverableError: (err) => {
-              reject(err);
-            },
-          });
-        };
-        el.addEventListener("click", onClick, {
-          once: true,
-          passive: true,
-        });
-        promise.finally(() => {
-          el.removeEventListener("click", onClick);
-        });
-      }
-      if (types.includes("view")) {
-        const d = setViewHook(el, () => {
-          ReactDOM.hydrateRoot(el, <Component />);
-        });
-        promise.finally(d);
-      }
-    }
     async function hydrate() {
-      ReactDOM.hydrateRoot(el, <Component {...props} />);
+      return new Promise<void>((resolve) => {
+        ReactDOM.hydrateRoot(el, <Wrapped onLoaded={resolve} />);
+      });
     }
   }
   async function stringify() {
-    // const clickHooks = new Set<string>();
+    const ssrCtx = createRenderingContext();
     const stream = await ReactDOMServer.renderToReadableStream(
       <SSRContext.Provider value={ssrCtx ?? false}>
         <Component {...props} />
@@ -209,21 +204,22 @@ export function fromReact<P>(
       html: await new Response(stream).text(),
       css: "",
       props: JSON.stringify(props),
+      hooks: ssrCtx.getHooks(),
     };
   }
 }
 
-export function createRenderingContext(): SSRContextApi {
-  const clickHooks = new Set<string>();
+function createRenderingContext(): SSRContextApi {
+  const hooks: Array<HookDef> = [];
   return {
     addClickHook: (selector: string) => {
-      console.log("add click hook", selector);
-      clickHooks.add(selector);
+      hooks.push({
+        type: "click",
+        selector,
+      });
     },
     getHooks() {
-      return {
-        clickHooks,
-      };
+      return hooks;
     },
   };
 }
@@ -236,7 +232,7 @@ export function toReact<P>(polyglot: PolyglotComponent<P>) {
         default: C,
       };
     }
-    const markup = await polyglot.stringify();
+    const markup = await polyglot.toMarkup();
     const id = "__poly" + Math.random().toString(32).slice(2);
     return {
       default: () => {
@@ -279,77 +275,32 @@ export function toReact<P>(polyglot: PolyglotComponent<P>) {
 /** ------------ Preact ------------ */
 const PreactSSRContext = Preact.createContext<SSRContextApi | false>(false);
 
-export function fromPreact<P>(
-  Component: any,
-  props: P,
-  ctx: SSRContextApi,
-): PolyglotComponent<P> {
+export function fromPreact<P>(Component: any, props: P): PolyglotComponent<P> {
   return {
     impl: "preact",
-    stringify,
+    toMarkup: stringify,
     attach,
-    getProps: () => ({ ...props }),
+    // getProps: () => ({ ...props }),
     load: async () => {
       return Component;
     },
   };
   function attach(el: HTMLElement): PolyglotInstance {
-    let isHydrated = false;
     return {
       hydrate,
-      setHydrationHook,
       dispose,
     };
     function dispose() {}
-    function setHydrationHook(types: string[]) {
-      const disposes: Function[] = [];
-      const dispose = () => {
-        let next: Function | undefined = undefined;
-        while ((next = disposes.pop())) {
-          next();
-        }
-      };
-      if (types.includes("click")) {
-        // click injector
-        const onClick = (ev: MouseEvent) => {
-          if (isHydrated) return;
-          isHydrated = true;
-          console.log("hydrate by click!");
-          // clone original event and re-dispatch
-          // @ts-ignore
-          const newEvent = new ev.constructor(ev.type, ev);
-          const TempLoader = () => {
-            preactHooks.useEffect(() => {
-              ev.target?.dispatchEvent(newEvent);
-              dispose();
-            }, []);
-            return h(Component, null);
-          };
-          preactHydrate(h(TempLoader, null), el);
-        };
-        el.addEventListener("click", onClick);
-        disposes.push(() => {
-          el.removeEventListener("click", onClick);
-        });
-      }
-
-      if (types.includes("view")) {
-        const d = setViewHook(el, () => {
-          hydrate();
-          dispose();
-        });
-        disposes.push(d);
-      }
-    }
     async function hydrate() {
       preactHydrate(h(Component, null), el);
     }
   }
   async function stringify() {
+    const ssrCtx = createRenderingContext();
     const vdom = h(
       PreactSSRContext.Provider,
       // @ts-ignore
-      { value: ctx ?? false },
+      { value: ssrCtx ?? false },
       // @ts-ignore
       h(Component, props),
     );
@@ -359,6 +310,7 @@ export function fromPreact<P>(
       html,
       css: "",
       props: JSON.stringify(props),
+      hooks: ssrCtx.getHooks(),
     };
   }
 }
@@ -371,33 +323,24 @@ export function toPreact<P>(poly: PolyglotComponent<P>) {
         default: () => C,
       };
     }
-
-    const markup = await poly.stringify();
+    const markup = await poly.toMarkup();
     const id = "__poly" + Math.random().toString(32).slice(2);
-    return {
-      default: () => {
-        const ref = preactHooks.useRef<HTMLDivElement>(null);
-        const initialHtml = preactHooks.useMemo(() => markup.html, []);
-        const ssrCtx = preactHooks.useContext(PreactSSRContext);
-        preactHooks.useEffect(() => {
-          // debugger;
-          if (ref.current) {
-            const instance = poly.attach(ref.current);
-            ref.current.innerHTML = initialHtml;
-            instance.hydrate();
-          }
-        }, [ref.current]);
 
-        if (ssrCtx) {
-          ssrCtx.addClickHook(`#${id}`);
-          // @ts-ignore
-          return h("div", {
-            ref,
-            id,
-            "data-poly-triggers": `click-${id}`,
-            dangerouslySetInnerHTML: { __html: initialHtml },
-          });
+    function Wrapped() {
+      const ref = preactHooks.useRef<HTMLDivElement>(null);
+      const initialHtml = preactHooks.useMemo(() => markup.html, []);
+      const ssrCtx = preactHooks.useContext(PreactSSRContext);
+      preactHooks.useEffect(() => {
+        // debugger;
+        if (ref.current) {
+          const instance = poly.attach(ref.current);
+          ref.current.innerHTML = initialHtml;
+          instance.hydrate();
         }
+      }, [ref.current]);
+
+      if (ssrCtx) {
+        ssrCtx.addClickHook(`#${id}`);
         // @ts-ignore
         return h("div", {
           ref,
@@ -405,34 +348,42 @@ export function toPreact<P>(poly: PolyglotComponent<P>) {
           "data-poly-triggers": `click-${id}`,
           dangerouslySetInnerHTML: { __html: initialHtml },
         });
+      }
+      // @ts-ignore
+      return h("div", {
+        ref,
+        id,
+        "data-poly-triggers": `click-${id}`,
+        dangerouslySetInnerHTML: { __html: initialHtml },
+      });
+    }
+
+    return {
+      default: () => {
+        return h(Wrapped, null);
       },
     };
   });
 }
 
 // ------ static
-export function fromStatic(
-  raw: string,
-  ctx: SSRContextApi,
-): PolyglotComponent<{}> {
+export function fromStatic(raw: string): PolyglotComponent<{}> {
   return {
     impl: "static",
-    stringify,
+    toMarkup: stringify,
     attach,
-    getProps: () => ({}),
+    // getProps: () => ({}),
     load: async () => {
       return raw;
     },
   };
-  function attach(el: HTMLElement): PolyglotInstance {
+  function attach(_el: HTMLElement): PolyglotInstance {
     // let isHydrated = false;
     return {
       hydrate,
-      setHydrationHook,
       dispose,
     };
-    function dispose() {}
-    function setHydrationHook(types: string[]) {
+    function dispose() {
       // DO nothing
     }
     async function hydrate() {
@@ -444,6 +395,82 @@ export function fromStatic(
       html: raw,
       css: "",
       props: JSON.stringify({}),
+      hooks: [],
     };
   }
+}
+
+// ------ svelte
+type SvelteRendererResult = {
+  html: string;
+  css: { code: string; map: string };
+  head: string;
+};
+
+export function fromSvelte<T>(
+  serverRenderer: { render: (props: T) => SvelteRendererResult },
+  clientComponent: SvelteComponentType,
+  props: T,
+): PolyglotComponent<T> {
+  let instance: InstanceType<SvelteComponentType> | undefined = undefined;
+  return {
+    impl: "svelte",
+    toMarkup: stringify,
+    attach,
+    // getProps: () => ({ ...props }),
+    load: async () => {
+      throw new Error("not implement");
+    },
+  };
+  function attach(el: HTMLElement): PolyglotInstance {
+    return {
+      hydrate,
+      dispose,
+    };
+    function dispose() {
+      instance?.$destroy();
+    }
+    async function hydrate() {
+      instance = new clientComponent({
+        target: el,
+        hydrate: true,
+      });
+    }
+  }
+  async function stringify() {
+    const ret = serverRenderer.render(props);
+    return {
+      html: ret.html,
+      css: "",
+      props: JSON.stringify(props),
+      hooks: [],
+    };
+  }
+}
+
+async function evaluateModuleCode(code: string) {
+  const b64 = btoa(unescape(encodeURIComponent(code)));
+  const url = "data:text/javascript;base64," + b64;
+  return await import(/* @vite-ignore */ url);
+}
+
+export async function getClientComponentFromSvelteTemplate(template: string) {
+  const client = svelteCompile(template, {
+    hydratable: true,
+    sveltePath: "https://esm.sh/svelte@4.1.2/",
+  });
+  const mod = await evaluateModuleCode(client.js.code);
+  const C = mod.default;
+  return C;
+}
+
+export async function getServerRendererFromSvelteTemplate(template: string) {
+  const ssr = svelteCompile(template, {
+    generate: "ssr",
+    sveltePath: "https://esm.sh/svelte@4.1.2/",
+  });
+  const mod = await evaluateModuleCode(ssr.js.code);
+  return mod.default as {
+    render: (props: any) => SvelteRendererResult;
+  };
 }
