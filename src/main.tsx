@@ -31,7 +31,6 @@ const PreactIsland = () => {
   );
 };
 {
-  // render root
   const PolyPreactIsland = fromPreact(PreactIsland, {});
   const PreactToReact = toReact(PolyPreactIsland);
   const Direct = (props: { name: string }) => {
@@ -68,11 +67,11 @@ const PreactIsland = () => {
     );
   }
   const rootElement = document.getElementById("root")!;
-  const p = fromReact(Root, {});
-  const instance = p.attach(rootElement);
-  const markup = await p.toMarkup();
+  const polyglot = fromReact(Root, {});
+  const markup = await polyglot.toMarkup();
+  const instance = polyglot.attach(rootElement);
   rootElement.innerHTML = markup.html;
-  setHydrationHook(rootElement, ["click"], instance.hydrate);
+  setHydrationHook(rootElement, markup.hooks, instance.hydrate);
 }
 
 {
@@ -190,6 +189,6 @@ const PreactIsland = () => {
     const instance = p.attach(el);
     const markup = await p.toMarkup();
     el.innerHTML = markup.html;
-    setHydrationHook(el, ["view"], instance.hydrate);
+    setHydrationHook(el, [{ type: "view" }], instance.hydrate);
   }
 }

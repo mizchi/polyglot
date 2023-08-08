@@ -41,13 +41,32 @@ export type PolyglotInstance = {
   dispose: () => void;
 };
 
-export type PolyglotComponent<P> = {
+export type PolyglotComponent<_P> = {
   impl: "react" | "preact" | "static" | "svelte";
   attach(root: HTMLElement): PolyglotInstance;
   toMarkup: () => Promise<StaticMarkup>;
   // getProps: () => P;
   load: () => Promise<any>;
 };
+
+// function markupToPolyglot(staticMarkup: StaticMarkup): PolyglotComponent<{}> {
+//   return {
+//     attach(_root) {
+//       return {
+//         hydrate() {
+//           return Promise.resolve();
+//         },
+//         dispose() {},
+//       };
+//     },
+//     toMarkup() {
+//       return Promise.resolve(staticMarkup);
+//     },
+//     // load() {
+//     //   return Promise.resolve(staticMarkup.html);
+//     // },
+//   };
+// }
 
 export interface ReactPolyglotComponent<Props>
   extends PolyglotComponent<Props> {
@@ -74,12 +93,18 @@ const polyglotWrapperStyle = {
 
 export async function setHydrationHook(
   target: HTMLElement,
-  types: string[],
+  defs: Array<HookDef>,
   hydrate: () => Promise<void>,
 ) {
   const hooks: Array<Promise<HookResult>> = [];
-  if (types.includes("click")) hooks.push(registerClickHook(target));
-  if (types.includes("view")) hooks.push(registerViewHook(target));
+  for (const hookDef of defs) {
+    if (hookDef.type === "click") {
+      hooks.push(registerClickHook(target));
+    }
+    if (hookDef.type === "view") {
+      hooks.push(registerViewHook(target));
+    }
+  }
   const resolved = await Promise.race(hooks);
   await hydrate();
   if (resolved.type === "click") {
@@ -173,7 +198,20 @@ export function fromReact<P>(
 
   return {
     impl: "react",
-    toMarkup: stringify,
+    async toMarkup() {
+      const ssrCtx = createRenderingContext();
+      const stream = await ReactDOMServer.renderToReadableStream(
+        <SSRContext.Provider value={ssrCtx ?? false}>
+          <Component {...props} />
+        </SSRContext.Provider>,
+      );
+      return {
+        html: await new Response(stream).text(),
+        css: "",
+        props: JSON.stringify(props),
+        hooks: ssrCtx.getHooks(),
+      };
+    },
     attach,
     // getProps: () => props,
     load: async () => {
@@ -184,27 +222,12 @@ export function fromReact<P>(
   };
   function attach(el: HTMLElement): PolyglotInstance {
     return {
-      hydrate,
+      async hydrate() {
+        return new Promise<void>((resolve) => {
+          ReactDOM.hydrateRoot(el, <Wrapped onLoaded={resolve} />);
+        });
+      },
       dispose() {},
-    };
-    async function hydrate() {
-      return new Promise<void>((resolve) => {
-        ReactDOM.hydrateRoot(el, <Wrapped onLoaded={resolve} />);
-      });
-    }
-  }
-  async function stringify() {
-    const ssrCtx = createRenderingContext();
-    const stream = await ReactDOMServer.renderToReadableStream(
-      <SSRContext.Provider value={ssrCtx ?? false}>
-        <Component {...props} />
-      </SSRContext.Provider>,
-    );
-    return {
-      html: await new Response(stream).text(),
-      css: "",
-      props: JSON.stringify(props),
-      hooks: ssrCtx.getHooks(),
     };
   }
 }
@@ -234,30 +257,20 @@ export function toReact<P>(polyglot: PolyglotComponent<P>) {
     }
     const markup = await polyglot.toMarkup();
     const id = "__poly" + Math.random().toString(32).slice(2);
-    return {
-      default: () => {
-        const ref = React.useRef<HTMLDivElement>(null);
-        const initialHtml = React.useMemo(() => markup.html, []);
-        const ssrCtx = React.useContext(SSRContext);
-        React.useEffect(() => {
-          if (ref.current) {
-            const instance = polyglot.attach(ref.current);
-            ref.current.innerHTML = initialHtml;
-            instance.hydrate();
-          }
-        }, [ref.current]);
-        if (ssrCtx) {
-          ssrCtx.addClickHook(`#${id}`);
-          return (
-            <div
-              id={id}
-              ref={ref}
-              style={polyglotWrapperStyle}
-              data-poly-triggers={`click-${id}`}
-              dangerouslySetInnerHTML={{ __html: initialHtml }}
-            />
-          );
+
+    function Wrapped() {
+      const ref = React.useRef<HTMLDivElement>(null);
+      const initialHtml = React.useMemo(() => markup.html, []);
+      const ssrCtx = React.useContext(SSRContext);
+      React.useEffect(() => {
+        if (ref.current) {
+          const instance = polyglot.attach(ref.current);
+          ref.current.innerHTML = initialHtml;
+          instance.hydrate();
         }
+      }, [ref.current]);
+      if (ssrCtx) {
+        ssrCtx.addClickHook(`#${id}`);
         return (
           <div
             id={id}
@@ -267,6 +280,20 @@ export function toReact<P>(polyglot: PolyglotComponent<P>) {
             dangerouslySetInnerHTML={{ __html: initialHtml }}
           />
         );
+      }
+      return (
+        <div
+          id={id}
+          ref={ref}
+          style={polyglotWrapperStyle}
+          data-poly-triggers={`click-${id}`}
+          dangerouslySetInnerHTML={{ __html: initialHtml }}
+        />
+      );
+    }
+    return {
+      default: () => {
+        return <Wrapped />;
       },
     };
   });
@@ -278,41 +305,39 @@ const PreactSSRContext = Preact.createContext<SSRContextApi | false>(false);
 export function fromPreact<P>(Component: any, props: P): PolyglotComponent<P> {
   return {
     impl: "preact",
-    toMarkup: stringify,
-    attach,
-    // getProps: () => ({ ...props }),
+    async toMarkup() {
+      const ssrCtx = createRenderingContext();
+      const vdom = h(
+        PreactSSRContext.Provider,
+        // @ts-ignore
+        { value: ssrCtx ?? false },
+        // @ts-ignore
+        h(Component, props),
+      );
+      await preactPrepass(vdom);
+      const html = preactRender(vdom as any);
+      return {
+        html,
+        css: "",
+        props: JSON.stringify(props),
+        hooks: ssrCtx.getHooks(),
+      };
+    },
+    attach(el) {
+      return {
+        async hydrate() {
+          // @ts-ignore
+          preactHydrate(h(Component, props), el);
+        },
+        dispose() {
+          // WIP
+        },
+      };
+    },
     load: async () => {
       return Component;
     },
   };
-  function attach(el: HTMLElement): PolyglotInstance {
-    return {
-      hydrate,
-      dispose,
-    };
-    function dispose() {}
-    async function hydrate() {
-      preactHydrate(h(Component, null), el);
-    }
-  }
-  async function stringify() {
-    const ssrCtx = createRenderingContext();
-    const vdom = h(
-      PreactSSRContext.Provider,
-      // @ts-ignore
-      { value: ssrCtx ?? false },
-      // @ts-ignore
-      h(Component, props),
-    );
-    await preactPrepass(vdom);
-    const html = preactRender(vdom as any);
-    return {
-      html,
-      css: "",
-      props: JSON.stringify(props),
-      hooks: ssrCtx.getHooks(),
-    };
-  }
 }
 
 export function toPreact<P>(poly: PolyglotComponent<P>) {
@@ -370,34 +395,31 @@ export function toPreact<P>(poly: PolyglotComponent<P>) {
 export function fromStatic(raw: string): PolyglotComponent<{}> {
   return {
     impl: "static",
-    toMarkup: stringify,
-    attach,
-    // getProps: () => ({}),
+    async toMarkup() {
+      return {
+        html: raw,
+        css: "",
+        props: JSON.stringify({}),
+        hooks: [],
+      };
+    },
+    attach(_el) {
+      // let isHydrated = false;
+      return {
+        hydrate,
+        dispose,
+      };
+      function dispose() {
+        // DO nothing
+      }
+      async function hydrate() {
+        // DO nothing
+      }
+    },
     load: async () => {
       return raw;
     },
   };
-  function attach(_el: HTMLElement): PolyglotInstance {
-    // let isHydrated = false;
-    return {
-      hydrate,
-      dispose,
-    };
-    function dispose() {
-      // DO nothing
-    }
-    async function hydrate() {
-      // DO nothing
-    }
-  }
-  async function stringify() {
-    return {
-      html: raw,
-      css: "",
-      props: JSON.stringify({}),
-      hooks: [],
-    };
-  }
 }
 
 // ------ svelte
@@ -415,37 +437,34 @@ export function fromSvelte<T>(
   let instance: InstanceType<SvelteComponentType> | undefined = undefined;
   return {
     impl: "svelte",
-    toMarkup: stringify,
-    attach,
+    async toMarkup() {
+      const ret = serverRenderer.render(props);
+      return {
+        html: ret.html,
+        css: "",
+        props: JSON.stringify(props),
+        hooks: [],
+      };
+    },
+    attach(el) {
+      return {
+        async hydrate() {
+          instance = new clientComponent({
+            target: el,
+            hydrate: true,
+          });
+        },
+        dispose() {
+          instance?.$destroy();
+        },
+      };
+    },
+
     // getProps: () => ({ ...props }),
     load: async () => {
       throw new Error("not implement");
     },
   };
-  function attach(el: HTMLElement): PolyglotInstance {
-    return {
-      hydrate,
-      dispose,
-    };
-    function dispose() {
-      instance?.$destroy();
-    }
-    async function hydrate() {
-      instance = new clientComponent({
-        target: el,
-        hydrate: true,
-      });
-    }
-  }
-  async function stringify() {
-    const ret = serverRenderer.render(props);
-    return {
-      html: ret.html,
-      css: "",
-      props: JSON.stringify(props),
-      hooks: [],
-    };
-  }
 }
 
 async function evaluateModuleCode(code: string) {
